@@ -1,0 +1,396 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Visualiseur d'Algorithme - Dijkstra sur OpenStreetMap</title>
+
+    <!-- Intégration de Leaflet pour la carte -->
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+
+    <!-- Intégration de Leaflet.draw pour dessiner des polygones -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet.draw/1.0.4/leaflet.draw.css" />
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet.draw/1.0.4/leaflet.draw.js"></script>
+
+    <!-- Intégration de Tailwind CSS pour le style -->
+    <script src="https://cdn.tailwindcss.com"></script>
+
+    <style>
+        /* Style pour s'assurer que la carte remplit tout l'écran */
+        body, html {
+            height: 100%;
+            margin: 0;
+            padding: 0;
+            overflow: hidden;
+            font-family: 'Inter', sans-serif;
+        }
+        #map {
+            width: 100%;
+            height: 100%;
+            cursor: default;
+        }
+        /* Personnalisation de l'icône de dessin de Leaflet.draw */
+        .leaflet-draw-draw-polygon {
+            background-image: url('data:image/svg+xml;charset=utf-8,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="%23333"><path d="M21 16.5c0 .38-.21.71-.53.88l-7.9 4.44c-.16.09-.34.13-.53.13s-.37-.04-.53-.13l-7.9-4.44A.991.991 0 013 16.5v-9c0-.38.21-.71.53-.88l7.9-4.44c.16-.09.34-.13.53-.13s.37.04.53.13l7.9 4.44c.32.17.53.5.53.88v9zm-9-11.34l-6.4 3.6 6.4 3.6 6.4-3.6-6.4-3.6zM5 15.3l6.4 3.6v-7.2L5 8.1v7.2z"/></svg>');
+            background-size: 20px 20px;
+        }
+    </style>
+</head>
+<body class="relative">
+
+    <div id="map"></div>
+
+    <!-- Panneau d'instructions et de statut -->
+    <div id="controls" class="absolute top-4 right-4 bg-white/80 backdrop-blur-sm p-4 rounded-lg shadow-lg max-w-sm z-[1000]">
+        <h1 class="text-xl font-bold text-gray-800 mb-2">Visualiseur d'Algorithme de Dijkstra</h1>
+        <p id="status" class="text-gray-600 text-sm">
+            <b>Étape 1 :</b> Utilisez l'outil polygone <span class="inline-block align-middle h-5 w-5 bg-center bg-no-repeat" style="background-image: url('data:image/svg+xml;charset=utf-8,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 24 24%22 fill=%22%23333%22><path d=%22M21 16.5c0 .38-.21.71-.53.88l-7.9 4.44c-.16.09-.34.13-.53.13s-.37-.04-.53-.13l-7.9-4.44A.991.991 0 013 16.5v-9c0-.38.21-.71.53-.88l7.9-4.44c.16-.09.34-.13.53-.13s.37.04.53.13l7.9 4.44c.32.17.53.5.53.88v9zm-9-11.34l-6.4 3.6 6.4 3.6 6.4-3.6-6.4-3.6zM5 15.3l6.4 3.6v-7.2L5 8.1v7.2z%22/></svg>');"></span> pour dessiner une zone sur la carte.
+        </p>
+        <button id="reset-button" class="hidden mt-4 w-full bg-blue-500 hover:bg-blue-600 text-white font-bold py-2 px-4 rounded-lg transition-colors" onclick="resetApp()">Recommencer</button>
+    </div>
+
+    <!-- Indicateur de chargement -->
+    <div id="loader" class="hidden absolute inset-0 bg-gray-900/50 flex items-center justify-center z-[1001]">
+        <div class="text-center">
+            <svg class="animate-spin h-10 w-10 text-white mx-auto" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+                <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+            </svg>
+            <p class="text-white mt-2">Chargement du réseau routier...</p>
+        </div>
+    </div>
+
+    <script>
+        // --- CONFIGURATION ---
+
+        const statusElement = document.getElementById('status');
+        const loaderElement = document.getElementById('loader');
+        const resetButton = document.getElementById('reset-button');
+        
+        // Vitesses estimées (km/h) par type de route selon la classification OpenStreetMap
+        const highwaySpeeds = {
+            'motorway': 110, 'trunk': 90, 'primary': 80, 'secondary': 70,
+            'tertiary': 50, 'unclassified': 40, 'residential': 30,
+            'motorway_link': 60, 'trunk_link': 50, 'primary_link': 50,
+            'secondary_link': 40, 'tertiary_link': 30, 'service': 10, 'living_street': 10
+        };
+
+        // Variables globales pour l'état de l'application
+        let map;
+        let drawnItems;
+        let graph = { nodes: new Map(), adj: new Map() };
+        let startPoint = null, endPoint = null;
+        let markers = [];
+        let visualLayers = [];
+
+        // --- INITIALISATION DE LA CARTE ---
+
+        function initializeMap() {
+            map = L.map('map').setView([44.8378, -0.5792], 13); // Centré sur Bordeaux
+
+            L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+                attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
+            }).addTo(map);
+
+            drawnItems = new L.FeatureGroup();
+            map.addLayer(drawnItems);
+
+            const drawControl = new L.Control.Draw({
+                draw: {
+                    polygon: { shapeOptions: { color: '#0ea5e9' } },
+                    polyline: false, rectangle: false, circle: false,
+                    marker: false, circlemarker: false
+                },
+                edit: { featureGroup: drawnItems, remove: false, edit: false }
+            });
+            map.addControl(drawControl);
+
+            map.on(L.Draw.Event.CREATED, handlePolygonDrawn);
+        }
+
+        // --- GESTION DES ÉVÉNEMENTS ---
+
+        // Étape 1: L'utilisateur dessine un polygone
+        function handlePolygonDrawn(event) {
+            const layer = event.layer;
+            drawnItems.addLayer(layer);
+            
+            // Désactiver le dessin après la première zone
+            map.removeControl(map.controls.draw);
+            
+            const points = layer.getLatLngs()[0].map(p => `${p.lat} ${p.lng}`);
+            const polyString = points.join(' ');
+            fetchRoadData(polyString);
+        }
+
+        // Étape 3 (suite): Clics pour définir le départ et l'arrivée
+        function onMapClick(e) {
+            if (!startPoint) {
+                startPoint = findNearestNode(e.latlng);
+                const marker = L.marker(startPoint, { title: 'Départ' }).addTo(map);
+                markers.push(marker);
+                statusElement.innerHTML = "<b>Étape 3 :</b> Sélectionnez maintenant un <b>point d'arrivée</b>.";
+            } else if (!endPoint) {
+                endPoint = findNearestNode(e.latlng);
+                const marker = L.marker(endPoint, { title: 'Arrivée' }).addTo(map);
+                markers.push(marker);
+                statusElement.innerHTML = "<b>Calcul en cours...</b> L'algorithme de Dijkstra explore le graphe.";
+                map.off('click', onMapClick); // Désactiver les clics
+                runDijkstra();
+            }
+        }
+        
+        // --- LOGIQUE DU GRAPHE ET DE L'API OVERPASS ---
+
+        // Étape 2: Interroger l'API Overpass
+        async function fetchRoadData(polyString) {
+            loaderElement.classList.remove('hidden');
+            statusElement.textContent = 'Requête à l\'API Overpass en cours pour récupérer les routes...';
+
+            const overpassUrl = 'https://overpass-api.de/api/interpreter';
+            const query = `
+                [out:json][timeout:25];
+                (
+                  way["highway"](poly:"${polyString}");
+                );
+                (._;>;);
+                out;
+            `;
+
+            try {
+                const response = await fetch(overpassUrl, {
+                    method: 'POST',
+                    body: 'data=' + encodeURIComponent(query)
+                });
+                const data = await response.json();
+                buildGraph(data.elements);
+            } catch (error) {
+                console.error('Erreur API Overpass:', error);
+                statusElement.textContent = 'Erreur lors de la récupération des données. Veuillez réessayer.';
+            } finally {
+                loaderElement.classList.add('hidden');
+            }
+        }
+
+        // Étape 3: Construire le graphe à partir des données OSM
+        function buildGraph(elements) {
+            statusElement.textContent = 'Construction du graphe à partir des données routières...';
+            graph = { nodes: new Map(), adj: new Map() };
+            
+            // 1. Ajouter tous les nœuds (intersections)
+            for (const el of elements) {
+                if (el.type === 'node') {
+                    graph.nodes.set(el.id, { lat: el.lat, lon: el.lon });
+                    graph.adj.set(el.id, []);
+                }
+            }
+
+            // 2. Créer les arêtes (segments de route)
+            for (const el of elements) {
+                if (el.type === 'way' && el.tags && highwaySpeeds[el.tags.highway]) {
+                    for (let i = 0; i < el.nodes.length - 1; i++) {
+                        const node1_id = el.nodes[i];
+                        const node2_id = el.nodes[i + 1];
+                        const node1 = graph.nodes.get(node1_id);
+                        const node2 = graph.nodes.get(node2_id);
+                        
+                        if (!node1 || !node2) continue;
+
+                        const distance = haversineDistance(node1, node2); // en km
+                        const speed = highwaySpeeds[el.tags.highway] || 30; // Vitesse par défaut
+                        const time = distance / speed; // Poids = temps de trajet
+
+                        // Graphe non-orienté: ajouter l'arête dans les deux sens
+                        graph.adj.get(node1_id).push({ node: node2_id, weight: time });
+                        graph.adj.get(node2_id).push({ node: node1_id, weight: time });
+                    }
+                }
+            }
+            drawGraph();
+            statusElement.innerHTML = "<b>Étape 3 :</b> Le réseau routier est chargé. Sélectionnez un <b>point de départ</b> en cliquant sur la carte.";
+            map.on('click', onMapClick); // Activer les clics pour la sélection
+        }
+
+        // --- ALGORITHME DE DIJKSTRA ET VISUALISATION ---
+
+        async function runDijkstra() {
+            if (!startPoint || !endPoint) return;
+
+            const startId = findNearestNode(startPoint).id;
+            const endId = findNearestNode(endPoint).id;
+
+            const distances = new Map();
+            const prev = new Map();
+            const pq = new PriorityQueue();
+            const visited = new Set();
+            
+            // Initialisation
+            for (const nodeId of graph.nodes.keys()) {
+                distances.set(nodeId, Infinity);
+                prev.set(nodeId, null);
+            }
+            distances.set(startId, 0);
+            pq.enqueue(startId, 0);
+            
+            let animationDelay = 1; // ms
+            let count = 0;
+
+            while (!pq.isEmpty()) {
+                const { element: u } = pq.dequeue();
+
+                if (visited.has(u)) continue;
+                visited.add(u);
+                
+                const u_coords = graph.nodes.get(u);
+                
+                // Visualisation de l'exploration
+                const visitedCircle = L.circle([u_coords.lat, u_coords.lon], {
+                    color: '#facc15', // Jaune
+                    radius: 8,
+                    weight: 2,
+                    fillOpacity: 0.5
+                }).addTo(map);
+                visualLayers.push(visitedCircle);
+
+                count++;
+                if(count % 50 === 0) { // On attend toutes les 50 itérations pour ne pas bloquer le navigateur
+                   await new Promise(r => setTimeout(r, animationDelay));
+                }
+                
+                if (u === endId) break; // Cible atteinte
+
+                const neighbors = graph.adj.get(u);
+                if (!neighbors) continue;
+                
+                for (const { node: v, weight } of neighbors) {
+                    const newDist = distances.get(u) + weight;
+                    if (newDist < distances.get(v)) {
+                        distances.set(v, newDist);
+                        prev.set(v, u);
+                        pq.enqueue(v, newDist);
+                    }
+                }
+            }
+            
+            // Reconstruire et dessiner le chemin final
+            const path = [];
+            let current = endId;
+            while (current) {
+                path.unshift(current);
+                current = prev.get(current);
+            }
+
+            if (path.length > 1 && path[0] === startId) {
+                const pathCoords = path.map(id => {
+                    const node = graph.nodes.get(id);
+                    return [node.lat, node.lon];
+                });
+                const pathLine = L.polyline(pathCoords, { color: '#3b82f6', weight: 6, opacity: 0.8 }).addTo(map);
+                visualLayers.push(pathLine);
+                statusElement.innerHTML = `<b>Chemin trouvé !</b> La distance est de ${calculatePathDistance(path).toFixed(2)} km.`;
+            } else {
+                statusElement.textContent = "Aucun chemin n'a été trouvé entre les deux points.";
+            }
+            resetButton.classList.remove('hidden');
+        }
+
+        // --- FONCTIONS UTILITAIRES ---
+
+        // Calcul de distance avec la formule de Haversine
+        function haversineDistance(coords1, coords2) {
+            const R = 6371; // Rayon de la Terre en km
+            const dLat = (coords2.lat - coords1.lat) * Math.PI / 180;
+            const dLon = (coords2.lon - coords1.lon) * Math.PI / 180;
+            const a =
+                0.5 - Math.cos(dLat) / 2 +
+                Math.cos(coords1.lat * Math.PI / 180) * Math.cos(coords2.lat * Math.PI / 180) *
+                (1 - Math.cos(dLon)) / 2;
+            return R * 2 * Math.asin(Math.sqrt(a));
+        }
+
+        // Trouver le nœud du graphe le plus proche d'un clic
+        function findNearestNode(latlng) {
+            let minDistance = Infinity;
+            let nearestNodeId = null;
+            for (const [id, coords] of graph.nodes.entries()) {
+                const dist = latlng.distanceTo(L.latLng(coords.lat, coords.lon));
+                if (dist < minDistance) {
+                    minDistance = dist;
+                    nearestNodeId = id;
+                }
+            }
+            const finalNode = graph.nodes.get(nearestNodeId);
+            return { id: nearestNodeId, lat: finalNode.lat, lng: finalNode.lon };
+        }
+
+        // Dessiner le graphe initial
+        function drawGraph() {
+            const lines = [];
+            const drawnEdges = new Set();
+            for (const [node1_id, neighbors] of graph.adj.entries()) {
+                for (const { node: node2_id } of neighbors) {
+                    const edgeId = [node1_id, node2_id].sort().join('-');
+                    if (drawnEdges.has(edgeId)) continue;
+                    
+                    const node1 = graph.nodes.get(node1_id);
+                    const node2 = graph.nodes.get(node2_id);
+                    lines.push([
+                        [node1.lat, node1.lon],
+                        [node2.lat, node2.lon]
+                    ]);
+                    drawnEdges.add(edgeId);
+                }
+            }
+            const graphLayer = L.polyline(lines, { color: '#6b7280', weight: 2, opacity: 0.5 }).addTo(map);
+            visualLayers.push(graphLayer);
+        }
+
+        function calculatePathDistance(path) {
+            let totalDistance = 0;
+            for (let i = 0; i < path.length - 1; i++) {
+                const node1 = graph.nodes.get(path[i]);
+                const node2 = graph.nodes.get(path[i+1]);
+                totalDistance += haversineDistance(node1, node2);
+            }
+            return totalDistance;
+        }
+
+        // Classe simple pour une file de priorité (utilisée par Dijkstra)
+        class PriorityQueue {
+            constructor() { this.elements = []; }
+            enqueue(element, priority) { this.elements.push({ element, priority }); this.sort(); }
+            dequeue() { return this.elements.shift(); }
+            isEmpty() { return this.elements.length === 0; }
+            sort() { this.elements.sort((a, b) => a.priority - b.priority); }
+        }
+        
+        // Réinitialiser l'application
+        function resetApp() {
+            // Nettoyer la carte
+            for (const layer of visualLayers.concat(markers)) {
+                map.removeLayer(layer);
+            }
+            drawnItems.clearLayers();
+
+            // Réinitialiser les variables d'état
+            visualLayers = [];
+            markers = [];
+            startPoint = null;
+            endPoint = null;
+            graph = { nodes: new Map(), adj: new Map() };
+
+            // Réinitialiser l'UI
+            map.off('click', onMapClick);
+            initializeMap(); // Ré-attache le contrôle de dessin
+            statusElement.innerHTML = "<b>Étape 1 :</b> Utilisez l'outil polygone pour dessiner une nouvelle zone.";
+            resetButton.classList.add('hidden');
+        }
+
+        // --- POINT D'ENTRÉE ---
+        document.addEventListener('DOMContentLoaded', initializeMap);
+    </script>
+
+</body>
+</html>
+
